@@ -17,6 +17,32 @@ import EmailTranscriptButton from '@/components/widget/EmailTranscriptButton';
 import StartNewConversationButton from '@/components/widget/StartNewConversationButton';
 import Toast from '@/components/widget/Toast';
 
+const readJsonFromSessionStorage = <T,>(key: string): T | null => {
+  try {
+    const value = sessionStorage.getItem(key);
+    return value ? JSON.parse(value) as T : null;
+  } catch {
+    return null;
+  }
+};
+
+const buildCurrentUserFromStoredUser = (storedUser: CurrentUser | null): CurrentUser => {
+  if (!storedUser) return {};
+
+  const user = storedUser as CurrentUser & {
+    fullName?: string;
+    phoneNumber?: string;
+    externalId?: string | number;
+  };
+
+  return {
+    ...user,
+    identifier: user.identifier || (user.externalId != null ? String(user.externalId) : undefined),
+    name: user.name || user.fullName || user.identifier,
+    phone_number: user.phone_number || user.phoneNumber,
+  };
+};
+
 export default function Widget() {
   const { t } = useLanguage('widget');
   const rootRef = useRef<HTMLDivElement>(null);
@@ -187,6 +213,7 @@ export default function Widget() {
     token: string,
     text: string,
     contact: { name?: string; email?: string; phone_number?: string },
+    customAttributes?: Record<string, any>,
   ): Promise<{ conversationId: string | null; createdWithMessage: boolean }> => {
     if (!forceNewConversationRef.current && conversationIdRef.current) {
       return { conversationId: conversationIdRef.current, createdWithMessage: false };
@@ -210,7 +237,12 @@ export default function Widget() {
     }
 
     conversationCreatePromiseRef.current = (async () => {
-      const newConv = await widgetService.createConversation(token, text, contact);
+      const newConv = await widgetService.createConversation(
+        token,
+        text,
+        contact,
+        customAttributes,
+      );
       const createdConversationId = newConv?.conversation?.id
         ? String(newConv.conversation.id)
         : null;
@@ -372,13 +404,18 @@ export default function Widget() {
             // Store user info in session
             if (msg.identifier || msg.user) {
               const userInfo = msg.user || {};
+              const storedUser = {
+                identifier: msg.identifier || userInfo.identifier || userInfo.externalId,
+                ...userInfo,
+              };
               sessionStorage.setItem(
                 'evo_widget_user',
-                JSON.stringify({
-                  identifier: msg.identifier,
-                  ...userInfo,
-                }),
+                JSON.stringify(storedUser),
               );
+              setCurrentUser(prev => ({
+                ...prev,
+                ...buildCurrentUserFromStoredUser(storedUser),
+              }));
             }
             break;
           case 'set-custom-attributes':
@@ -424,11 +461,15 @@ export default function Widget() {
         setWidgetConfig(widgetConfigData);
 
         // Set current user data
+        const storedUser = buildCurrentUserFromStoredUser(
+          readJsonFromSessionStorage<CurrentUser>('evo_widget_user'),
+        );
         let userToSet = (cfg as any).current_user;
         if (!userToSet && (cfg as any).contact) {
           // If no current_user but contact exists, use contact data
           userToSet = (cfg as any).contact;
         }
+        userToSet = { ...(userToSet || {}), ...storedUser };
 
         if (userToSet) {
           setCurrentUser(userToSet);
@@ -1242,13 +1283,20 @@ export default function Widget() {
 
         await widgetService.getConfig(token);
 
+        const storedUser = buildCurrentUserFromStoredUser(
+          readJsonFromSessionStorage<CurrentUser>('evo_widget_user'),
+        );
         const contact = {
-          name: currentUser.name || '',
-          email: currentUser.email || '',
-          phone_number: currentUser.phone_number || '',
+          name: storedUser.name || currentUser.name || '',
+          email: storedUser.email || currentUser.email || '',
+          phone_number: storedUser.phone_number || currentUser.phone_number || '',
         };
+        const customAttributes = readJsonFromSessionStorage<Record<string, any>>(
+          'evo_widget_custom_attrs',
+        ) || {};
 
-        const { conversationId: resolvedConversationId, createdWithMessage } = await ensureConversationForSend(token, text, contact);
+        const { conversationId: resolvedConversationId, createdWithMessage } =
+          await ensureConversationForSend(token, text, contact, customAttributes);
         if (!createdWithMessage) {
           try {
             await widgetService.sendMessage(
@@ -1338,12 +1386,15 @@ export default function Widget() {
 
       // Add stored user info to contact data
       if (storedUser) {
-        const userData = JSON.parse(storedUser);
+        const userData = buildCurrentUserFromStoredUser(JSON.parse(storedUser));
         if (userData.identifier && !mergedData.fullName) {
-          mergedData.fullName = userData.identifier;
+          mergedData.fullName = userData.name || userData.identifier;
         }
         if (userData.email && !mergedData.emailAddress) {
           mergedData.emailAddress = userData.email;
+        }
+        if (userData.phone_number && !mergedData.phoneNumber) {
+          mergedData.phoneNumber = userData.phone_number;
         }
       }
 
